@@ -1,0 +1,134 @@
+% EHG vs LG-like Dirichlet selectivity and crosstalk demo (N=15)
+clear; close all; clc;
+
+N = 15; M = N+1;
+sigma_amp = 0.05;                 % amplitude RMS error
+sigma_phase_deg = 3.0;            % phase RMS error (degrees)
+sigma_phase = deg2rad(sigma_phase_deg);
+rng(42);
+
+% ---- Build weights ----
+k = (0:N).';
+% Rectangular (EHG)
+amp_noise_rect = sigma_amp * randn(N+1,1);
+phase_noise_rect = sigma_phase * randn(N+1,1);
+w_ehg = (1 + amp_noise_rect) .* exp(1i*phase_noise_rect);
+
+% Gaussian (LG-like)
+mu = N/2; sigma = 0.28*(N+1);
+win_gauss = exp(-0.5*((k-mu)/sigma).^2);
+amp_noise_gauss = sigma_amp * randn(N+1,1);
+phase_noise_gauss = sigma_phase * randn(N+1,1);
+w_lg = win_gauss .* (1 + amp_noise_gauss) .* exp(1i*phase_noise_gauss);
+
+% ---- Scan delta curves ----
+num_pts = 4001;
+deltas = linspace(-pi, pi, num_pts);
+I_ehg = zeros(size(deltas));
+I_lg  = zeros(size(deltas));
+den_ehg = sum(abs(w_ehg));
+den_lg  = sum(abs(w_lg));
+for ii = 1:num_pts
+    d = deltas(ii);
+    A_ehg = sum(w_ehg .* exp(1i*k*d)) / den_ehg;
+    A_lg  = sum(w_lg  .* exp(1i*k*d)) / den_lg;
+    I_ehg(ii) = abs(A_ehg).^2;
+    I_lg(ii)  = abs(A_lg).^2;
+end
+
+% ---- FWHM (simple) ----
+fwhm_fun = @(x,y) local_fwhm(x, y./max(y));
+fwhm_ehg = fwhm_fun(deltas, I_ehg);
+fwhm_lg  = fwhm_fun(deltas, I_lg);
+
+% ---- Nearest notch depth (dB) ----
+notch_fun = @(x,y) local_notch_db(x, y./max(y));
+notch_ehg_db = notch_fun(deltas, I_ehg);
+notch_lg_db  = notch_fun(deltas, I_lg);
+
+% ---- Crosstalk matrices ----
+C_ehg = zeros(M,M);
+C_lg  = zeros(M,M);
+for jj = 1:M
+    for kk = 1:M
+        delta = 2*pi*(jj-kk)/M;
+        A_ehg = sum(w_ehg .* exp(1i*k*delta)) / den_ehg;
+        A_lg  = sum(w_lg  .* exp(1i*k*delta)) / den_lg;
+        C_ehg(jj,kk) = abs(A_ehg).^2;
+        C_lg(jj,kk)  = abs(A_lg).^2;
+    end
+end
+C_ehg = C_ehg ./ sum(C_ehg,2);
+C_lg  = C_lg  ./ sum(C_lg,2);
+
+% ---- Metrics: mean off-diagonal dB ----
+mean_off_db = @(C) 10*log10( (sum(C,'all') - sum(diag(C))) / (M*(M-1)) );
+
+off_ehg_db = mean_off_db(C_ehg);
+off_lg_db  = mean_off_db(C_lg);
+diag_ehg   = mean(diag(C_ehg));
+diag_lg    = mean(diag(C_lg));
+
+fprintf('N=%d, M=%d\n', N, M);
+fprintf('EHG:    FWHM=%.4f rad (%.2f deg), notch=%.1f dB, offdiag=%.1f dB, diag=%.3f\n', ...
+    fwhm_ehg, fwhm_ehg*180/pi, notch_ehg_db, off_ehg_db, diag_ehg);
+fprintf('LG-like: FWHM=%.4f rad (%.2f deg), notch=%.1f dB, offdiag=%.1f dB, diag=%.3f\n', ...
+    fwhm_lg, fwhm_lg*180/pi, notch_lg_db, off_lg_db, diag_lg);
+
+% ---- Plots ----
+figure('Color','w'); 
+plot(deltas, I_ehg, 'LineWidth',1.5); hold on;
+plot(deltas, I_lg, '--', 'LineWidth',1.5);
+xline(0); xlabel('\Delta (rad)'); ylabel('Normalized intensity');
+title('Analyzer response vs. phase mismatch, N=15 (M=16)'); legend('EHG (rect)','LG-like (gauss)'); grid on;
+
+figure('Color','w');
+imagesc(C_ehg); axis image; colorbar;
+xlabel('Analyzer index k'); ylabel('Symbol index j');
+title('Crosstalk matrix — EHG (N=15)');
+
+figure('Color','w');
+imagesc(C_lg); axis image; colorbar;
+xlabel('Analyzer index k'); ylabel('Symbol index j');
+title('Crosstalk matrix — LG-like (N=15)');
+
+% ---- Helpers ----
+function w = deg2rad(x)
+    w = pi*x/180;
+end
+
+function val = local_notch_db(x, y)
+    % assume main peak near 0; find minimum to the right as nearest notch
+    [~, imax] = max(y);
+    yr = y(imax+1:end);
+    if isempty(yr)
+        val = NaN; return;
+    end
+    ymin = min(yr);
+    if ymin <= 0
+        val = 100;
+    else
+        val = 10*log10(1./ymin);
+    end
+end
+
+function w = local_fwhm(x, y)
+    [~, imax] = max(y);
+    half = 0.5;
+    left = NaN; right = NaN;
+    for i = imax:-1:2
+        if y(i) >= half && y(i-1) < half
+            frac = (half - y(i-1)) / (y(i) - y(i-1) + 1e-15); %#ok<*NASGU>
+            left = x(i-1) + frac*(x(i)-x(i-1));
+            break;
+        end
+    end
+    for i = imax:length(y)-1
+        if y(i) >= half && y(i+1) < half
+            frac = (half - y(i+1)) / (y(i) - y(i+1) + 1e-15);
+            right = x(i+1) + frac*(x(i)-x(i+1));
+            break;
+        end
+    end
+    w = right - left;
+end
