@@ -1,0 +1,138 @@
+
+% Two-stage pipeline: moment prefilter + analyzer (EHG vs LG)
+% Outputs: MI vs leakage, BER vs leakage (M=16), and BER vs M at fixed leakage.
+% Fixed version: remove erroneous cell indexing on Ceff_* in BER vs M loop.
+clear; close all; clc;
+
+rng(123);
+sigma_amp = 0.05;
+sigma_phase_deg = 3.0;
+sigma_phase = deg2rad(sigma_phase_deg);
+
+% helper: build weights
+build_weights = @(N,win) local_build_weights(N, sigma_amp, sigma_phase, win);
+
+% base N=15 (M=16)
+N = 15; M = N+1;
+w_ehg = build_weights(N,'rect');
+w_lg  = build_weights(N,'gauss');
+C_ehg = local_crosstalk(N, w_ehg);
+C_lg  = local_crosstalk(N, w_lg);
+
+p_vals = linspace(0,0.3,16);
+s_ehg = 0.9;
+s_lg  = 0.0;
+
+ber_ehg = zeros(size(p_vals)); ber_lg = ber_ehg;
+mi_ehg  = zeros(size(p_vals)); mi_lg  = mi_ehg;
+det_ehg = zeros(size(p_vals)); det_lg = det_ehg;
+
+for ii=1:numel(p_vals)
+    p = p_vals(ii);
+    [Ceff_e, de_e] = local_effective(C_ehg, p, s_ehg);
+    [Ceff_l, de_l] = local_effective(C_lg,  p, s_lg);
+    ber_ehg(ii) = local_ber(Ceff_e);
+    ber_lg(ii)  = local_ber(Ceff_l);
+    mi_ehg(ii)  = local_mi(Ceff_e);
+    mi_lg(ii)   = local_mi(Ceff_l);
+    det_ehg(ii) = de_e; det_lg(ii) = de_l;
+end
+
+figure('Color','w');
+plot(p_vals, mi_ehg, 'LineWidth',1.5); hold on;
+plot(p_vals, mi_lg, '--', 'LineWidth',1.5); grid on;
+xlabel('Off-manifold leakage fraction p_{om}');
+ylabel('Mutual information I(X;Y) [bits]');
+title('M=16: Mutual information vs. off-manifold leakage');
+legend('EHG+Prefilter','LG-only');
+
+figure('Color','w');
+plot(p_vals, ber_ehg, 'LineWidth',1.5); hold on;
+plot(p_vals, ber_lg, '--', 'LineWidth',1.5); grid on;
+xlabel('Off-manifold leakage fraction p_{om}');
+ylabel('Symbol error rate (ML decision)');
+title('M=16: BER vs. off-manifold leakage');
+legend('EHG+Prefilter','LG-only');
+
+% BER vs M at fixed leakage
+p_fixed = 0.2;
+Ms = [8 16 32];
+ber_ehg_M = zeros(size(Ms));
+ber_lg_M  = zeros(size(Ms));
+for t=1:numel(Ms)
+    Mcur = Ms(t); Ncur = Mcur-1;
+    Ce = local_crosstalk(Ncur, build_weights(Ncur,'rect'));
+    Cl = local_crosstalk(Ncur, build_weights(Ncur,'gauss'));
+    [Ceff_e, ~] = local_effective(Ce, p_fixed, s_ehg);
+    [Ceff_l, ~] = local_effective(Cl, p_fixed, s_lg);
+    ber_ehg_M(t) = local_ber(Ceff_e);   % <-- fixed (no cell indexing)
+    ber_lg_M(t)  = local_ber(Ceff_l);   % <-- fixed (no cell indexing)
+end
+
+figure('Color','w');
+plot(Ms, ber_ehg_M, 'o-', 'LineWidth',1.5); hold on;
+plot(Ms, ber_lg_M,  'o--','LineWidth',1.5); grid on;
+xlabel('Alphabet size M');
+ylabel('Symbol error rate (ML decision)');
+title('BER vs. dimensionality at p_{om}=0.2');
+legend('EHG+Prefilter','LG-only');
+
+% ---- helpers ----
+function w = local_build_weights(N, sigma_amp, sigma_phase, win)
+    k = (0:N).';
+    switch win
+        case 'rect'
+            base = ones(N+1,1);
+        case 'gauss'
+            mu = N/2; sigma = 0.28*(N+1);
+            base = exp(-0.5*((k-mu)/sigma).^2);
+        otherwise
+            error('win must be rect or gauss');
+    end
+    amp_noise = sigma_amp * randn(N+1,1);
+    phase_noise = sigma_phase * randn(N+1,1);
+    w = base .* (1 + amp_noise) .* exp(1i*phase_noise);
+end
+
+function C = local_crosstalk(N, w)
+    M = N+1;
+    C = zeros(M,M);
+    den = sum(abs(w));
+    k = (0:N).';
+    for j=1:M
+        for kk=1:M
+            delta = 2*pi*(j-kk)/M;
+            A = sum(w .* exp(1i*k*delta)) / den;
+            C(j,kk) = abs(A).^2;
+        end
+    end
+    C = C ./ sum(C,2);
+end
+
+function [Ceff, det_eff] = local_effective(Cbase, p_om, s_reject)
+    M = size(Cbase,1);
+    U = ones(M,M)/M;
+    residual = p_om*(1 - s_reject);
+    inman = (1 - p_om);
+    Ceff = inman*Cbase + residual*U;
+    det_eff = inman + residual;
+    Ceff = Ceff ./ det_eff;
+end
+
+function v = local_ber(C)
+    v = 1 - mean(max(C,[],2));
+end
+
+function I = local_mi(C)
+    M = size(C,1);
+    Pxy = C / M;                % uniform prior
+    Py = sum(Pxy,1);
+    ratio = C ./ Py;            % P(y|x)/P(y)
+    ratio(~isfinite(ratio)) = 1;
+    I = sum(Pxy .* log2( max(ratio,1e-15) ), 'all');
+end
+
+function w = deg2rad(d)
+    w = pi*d/180;
+end
+
